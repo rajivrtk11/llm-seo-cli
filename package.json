@@ -3,9 +3,9 @@
   "version": "1.0.0",
   "description": "",
   "main": "chat-gpt.js",
-  "start": "node chat-gpt.js",
   "type": "module",
   "scripts": {
+    "start": "node chat-gpt.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
