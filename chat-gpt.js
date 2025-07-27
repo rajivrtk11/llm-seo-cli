@@ -10,9 +10,9 @@ if (!token) throw new Error('❌ Missing BROWSERLESS_TOKEN in env');
 
 // const prompt = "Suggest best phones under 50000 INR in 2025";
 // const prompt = "Suggest me best shoes to buy in 2025";
-// const prompt = "What is the capital of France?";
+const prompt = "What are the recent research findings on CRISPR gene editing in 2025?";
 // const prompt = "Suggest me best saas product for reddit lead generation in 2025";
-const prompt = "Best lead generation tool in 2025"; // Change this to your desired prompt
+// const prompt = "Best lead generation tool in 2025"; // Change this to your desired prompt
 
 const cookiesPath = path.resolve('./cookies.json');
 const screenshotDir = path.resolve('./screenshots');
@@ -53,6 +53,12 @@ async function getWebSocketEndpoint() {
     return json?.data?.reconnect?.browserWSEndpoint;
 }
 
+async function getWebSocketDebuggerUrlForLocal() {
+    const response = await fetch('http://127.0.0.1:9222/json/version');
+    const data = await response.json();
+    return data.webSocketDebuggerUrl;
+}
+
 async function handleInput(page) {
     // Type prompt with human-like behavior
     // 🎯 Wait for the prompt input to appear
@@ -86,9 +92,109 @@ async function handleInput(page) {
     await takeScreenshot(page, 'after-typing');
 }
 
+async function extractSources(page) {
+    // Extract citation and "More" links
+    const extraLinks = await page.evaluate(() => {
+        const result = {
+            citations: [],
+            more: []
+        };
+
+        const extractLinks = (section) => {
+            const links = [];
+            const sectionElement = Array.from(document.querySelectorAll('li.border-token-border-light'))
+                .find(el => el.innerText.trim() === section);
+            if (!sectionElement) return links;
+
+            const ul = sectionElement.nextElementSibling;
+            if (!ul) return links;
+
+            const items = ul.querySelectorAll('li > a');
+            items.forEach(a => {
+                const url = a.href;
+                const source = a.querySelector('.text-xs')?.innerText?.trim();
+                const title = a.querySelector('.font-semibold')?.innerText?.trim();
+                const description = a.querySelector('.text-token-text-secondary')?.innerText?.trim();
+                links.push({ url, source, title, description });
+            });
+            return links;
+        };
+
+        result.citations = extractLinks('Citations');
+        result.more = extractLinks('More');
+
+        return result;
+    });
+
+// 🖨️ Display formatted output
+    if (extraLinks.citations.length || extraLinks.more.length) {
+        console.log('\n🔗 Citations & More Links:\n');
+
+        const printSection = (name, links) => {
+            if (!links.length) return;
+            console.log(`📚 ${name.toUpperCase()}:`);
+            links.forEach((item, idx) => {
+                console.log(`\n${idx + 1}. 🔗 [${item.title}](${item.url})`);
+                console.log(`   🏷️ Source: ${item.source}`);
+                if (item.description) {
+                    console.log(`   📝 Description: ${item.description}`);
+                }
+            });
+            console.log('\n');
+        };
+
+        printSection('Citations', extraLinks.citations);
+        printSection('More', extraLinks.more);
+    } else {
+        console.log('ℹ️ No Citations or More links found.');
+    }
+}
+
+async function getSources(page) {
+    try {
+        // const sourcesButtonSelector = 'button[aria-label="Sources"]';
+        //
+        // await page.waitForSelector(sourcesButtonSelector, {
+        //     timeout: 5000,
+        //     visible: true
+        // });
+
+        // const sourcesButton = await page.$(sourcesButtonSelector);
+        await page.evaluate(() => {
+            const btn = document.querySelector('.group\\/footnote');
+            if (btn) {
+                btn.click();
+                console.log('✅ Clicked the Sources button');
+            }
+            else {
+                console.log('❌ Sources button element was null');
+            }
+        });
+
+        // if (btn) {
+        //     btn.click();
+        //     console.log('✅ Clicked the Sources button');
+        //     await takeScreenshot(page, 'clicked-sources');
+        //     await new Promise(resolve => setTimeout(resolve, 2000));
+        // }
+
+        // if (sourcesButton) {
+        //     await sourcesButton.click();
+        //     console.log('✅ Clicked the Sources button');
+        //     await takeScreenshot(page, 'clicked-sources');
+        //     await new Promise(resolve => setTimeout(resolve, 2000)); // Wait for modal to open
+        // }
+        // else {
+        //     console.log('❌ Sources button element was null');
+        // }
+    } catch (err) {
+        console.log('❌ Failed to click Sources button:', err.message);
+    }
+}
 async function runAutomation() {
     // let wsEndpoint = await getWebSocketEndpoint();
-    let wsEndpoint = `wss://production-sfo.browserless.io/chromium?token=${token}&proxy=residential&stealth=true`
+    // let wsEndpoint = `wss://production-sfo.browserless.io/chromium?token=${token}&proxy=residential&stealth=true`
+    let wsEndpoint = await getWebSocketDebuggerUrlForLocal();
     console.log('✅ Got WebSocket endpoint:', wsEndpoint);
 
     let browser = await puppeteer.connect({ browserWSEndpoint: wsEndpoint });
@@ -102,14 +208,14 @@ async function runAutomation() {
     // await page.setCookie(...cookies);
 
     // Navigate to ChatGPT
-    await page.goto('https://chatgpt.com/', { waitUntil: 'networkidle2' });
-    await new Promise(resolve => setTimeout(resolve, 2000)); // wait for 2 seconds
+    await page.goto('https://chatgpt.com/', {waitUntil: 'networkidle2'});
+    await new Promise(resolve => setTimeout(resolve, 5000)); // wait for 2 seconds
 
     await takeScreenshot(page, 'opened-chatgpt');
 
     // Accept cookie if needed
     try {
-        await page.waitForSelector('button:has-text("Reject non-essential")', { timeout: 3000 });
+        await page.waitForSelector('button:has-text("Reject non-essential")', {timeout: 3000});
         await page.click('button:has-text("Accept all")');
         console.log('✅ Accepted cookies');
         await takeScreenshot(page, 'accepted-cookies');
@@ -130,11 +236,16 @@ async function runAutomation() {
 
         // reload the page multiple times with random mouse movements until login page goes away
         for (let i = 0; i < 5 && isLoginPage; i++) {
-            browser = await puppeteer.connect({ browserWSEndpoint: wsEndpoint });
+            // close existing browser session and wait for some time
+            await browser.close();
+            await new Promise(resolve => setTimeout(resolve, 5000*i));
+
+            // start new session
+            browser = await puppeteer.connect({browserWSEndpoint: wsEndpoint});
             page = await browser.newPage();
 
-            await page.goto('https://chatgpt.com/', { waitUntil: 'networkidle2' });
-            await new Promise(resolve => setTimeout(resolve, 2000)); // wait for 2 seconds
+            await page.goto('https://chatgpt.com/', {waitUntil: 'networkidle2'});
+            await new Promise(resolve => setTimeout(resolve, 5000)); // wait for 2 seconds
 
             await takeScreenshot(page, 'opened-chatgpt');
 
@@ -146,8 +257,8 @@ async function runAutomation() {
                 await new Promise(resolve => setTimeout(resolve, Math.random() * 500 + 200)); // random delay
             }
 
-            await page.reload({ waitUntil: 'networkidle2' });
-            await new Promise(resolve => setTimeout(resolve, 2000*i)); // wait for 2 seconds
+            await page.reload({waitUntil: 'networkidle2'});
+            await new Promise(resolve => setTimeout(resolve, 2000 * i)); // wait for 2 seconds
             await takeScreenshot(page, `reloaded-chatgpt-${i + 1}`);
 
             // Check again if login is required
@@ -155,8 +266,7 @@ async function runAutomation() {
             if (newUrl.includes('/log-in') || newUrl.includes('/login')) {
                 console.log('🔐 Still on login page, performing login steps...');
                 // continue
-            }
-            else {
+            } else {
                 console.log('✅ Successfully navigated away from login page');
                 isLoginPage = false;
             }
@@ -174,7 +284,13 @@ async function runAutomation() {
     await takeScreenshot(page, 'after-press-enter');
 
     // Wait for response
-    await page.waitForSelector('.markdown.prose', { timeout: 60000 });
+    await page.waitForSelector('.markdown.prose', {timeout: 60000});
+
+    // wait until comes to composer state
+    await page.waitForSelector('[data-testid="composer-speech-button"]', {
+        visible: true,
+        timeout: 30000, // wait max 30 seconds
+    });
     await new Promise(resolve => setTimeout(resolve, 2000)); // wait for 2 seconds
     await takeScreenshot(page, 'response-loaded');
 
@@ -184,6 +300,10 @@ async function runAutomation() {
     });
     console.log('\n🧠 ChatGPT Response:\n', response);
 
+    // click on sources button
+    await getSources(page)
+
+    await extractSources(page)
     await browser.close();
 }
 
