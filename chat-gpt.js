@@ -4,6 +4,7 @@ import puppeteer from 'puppeteer';
 import fs from 'fs';
 import path from 'path';
 import { loginToChatGPT, solveCloudflareCheckbox } from "./login.js";
+import {getWSUrl} from "./utils.js";
 
 const token = process.env.BROWSERLESS_TOKEN;
 if (!token) throw new Error('❌ Missing BROWSERLESS_TOKEN in env');
@@ -26,37 +27,6 @@ async function takeScreenshot(page, label) {
     const fileName = `${String(step++).padStart(2, '0')}-${label}.png`;
     await page.screenshot({ path: path.join(screenshotDir, fileName), fullPage: true });
     console.log(`📸 Screenshot taken: ${fileName}`);
-}
-
-async function getWebSocketEndpoint() {
-    const url = `https://production-sfo.browserless.io/chrome/bql?token=${token}`;
-
-    const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            query: `mutation AskChatGPT {
-            reconnect {
-                    browserWSEndpoint
-                }
-            }`,
-            operationName: "AskChatGPT",
-            variables: {},
-        }),
-    });
-
-    const json = await res.json();
-    if (json.errors) {
-        throw new Error('GraphQL Error: ' + JSON.stringify(json.errors, null, 2));
-    }
-
-    return json?.data?.reconnect?.browserWSEndpoint;
-}
-
-async function getWebSocketDebuggerUrlForLocal() {
-    const response = await fetch('http://127.0.0.1:9222/json/version');
-    const data = await response.json();
-    return data.webSocketDebuggerUrl;
 }
 
 async function handleInput(page) {
@@ -150,81 +120,62 @@ async function extractSources(page) {
     }
 }
 
+async function htmlToJson(page) {
+    const response = await page.evaluate(() => {
+        const container = document.querySelectorAll('.markdown.prose');
+        const last = container[container.length - 1];
+
+        if (!last) return null;
+
+        // Recursive function to convert DOM to JSON
+        function domToJson(element) {
+            const obj = {
+                tag: element.tagName.toLowerCase(),
+                text: element.innerText?.trim() || '',
+            };
+
+            const children = Array.from(element.children);
+            if (children.length) {
+                obj.children = children.map(domToJson);
+            }
+
+            return obj;
+        }
+
+        return domToJson(last);
+    });
+
+    console.log('\n🧠 ChatGPT Structured Response:\n', JSON.stringify(response, null, 2));
+}
+
 async function getSources(page) {
     try {
-        // const sourcesButtonSelector = 'button[aria-label="Sources"]';
-        //
-        // await page.waitForSelector(sourcesButtonSelector, {
-        //     timeout: 5000,
-        //     visible: true
-        // });
+        // Optional: Give the page a little time to finish loading if just navigated
+        await new Promise(resolve => setTimeout(resolve, 3000))
 
-        // const sourcesButton = await page.$(sourcesButtonSelector);
-        await page.evaluate(() => {
-            const btn = document.querySelector('.group\\/footnote');
-            if (btn) {
-                btn.click();
-                console.log('✅ Clicked the Sources button');
-            }
-            else {
-                console.log('❌ Sources button element was null');
-            }
+        console.log('⏳ Waiting for the Sources button...');
+        await page.waitForSelector('button[aria-label="Sources"]', {
+            visible: true,
+            timeout: 10000
         });
 
-        // if (btn) {
-        //     btn.click();
-        //     console.log('✅ Clicked the Sources button');
-        //     await takeScreenshot(page, 'clicked-sources');
-        //     await new Promise(resolve => setTimeout(resolve, 2000));
-        // }
+        console.log('✅ Sources button is visible — clicking now...');
+        await page.click('button[aria-label="Sources"]');
 
-        // if (sourcesButton) {
-        //     await sourcesButton.click();
-        //     console.log('✅ Clicked the Sources button');
-        //     await takeScreenshot(page, 'clicked-sources');
-        //     await new Promise(resolve => setTimeout(resolve, 2000)); // Wait for modal to open
-        // }
-        // else {
-        //     console.log('❌ Sources button element was null');
-        // }
+        // Optional: Wait for the sources section/modal to appear
+        await new Promise(resolve => setTimeout(resolve, 1000))
+
+        // Extract links inside sources, if applicable
+        // const sources = await page.$$eval('a[href^="http"]', links =>
+        //     links.map(link => link.href)
+        // );
+        // console.log('🔗 Sources found:', sources);
     } catch (err) {
-        console.log('❌ Failed to click Sources button:', err.message);
+        console.error('❌ Error in getSources:', err.message);
     }
 }
-async function runAutomation() {
-    // let wsEndpoint = await getWebSocketEndpoint();
-    // let wsEndpoint = `wss://production-sfo.browserless.io/chromium?token=${token}&proxy=residential&stealth=true`
-    let wsEndpoint = await getWebSocketDebuggerUrlForLocal();
-    console.log('✅ Got WebSocket endpoint:', wsEndpoint);
 
-    let browser = await puppeteer.connect({ browserWSEndpoint: wsEndpoint });
-    let page = await browser.newPage();
-
-    // Set user agent
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36');
-
-    // Set cookies
-    const cookies = JSON.parse(fs.readFileSync(cookiesPath));
-    // await page.setCookie(...cookies);
-
-    // Navigate to ChatGPT
-    await page.goto('https://chatgpt.com/', {waitUntil: 'networkidle2'});
-    await new Promise(resolve => setTimeout(resolve, 5000)); // wait for 2 seconds
-
-    await takeScreenshot(page, 'opened-chatgpt');
-
-    // Accept cookie if needed
-    try {
-        await page.waitForSelector('button:has-text("Reject non-essential")', {timeout: 3000});
-        await page.click('button:has-text("Accept all")');
-        console.log('✅ Accepted cookies');
-        await takeScreenshot(page, 'accepted-cookies');
-    } catch (_) {
-        console.log('ℹ️ No cookie banner');
-        await takeScreenshot(page, 'no-cookie-banner');
-    }
-
-    // Check if login is required
+async function reloadPage(page, browser) {
     const currentUrl = page.url();
 
     let isLoginPage = false;
@@ -274,8 +225,43 @@ async function runAutomation() {
     } else {
         console.log('➡️ Skipping login steps; not on login route');
     }
+}
 
-    // addin input
+async function runAutomation() {
+    let wsEndpoint = await getWSUrl();
+    console.log('✅ Got WebSocket endpoint:', wsEndpoint);
+
+    let browser = await puppeteer.connect({ browserWSEndpoint: wsEndpoint });
+    let page = await browser.newPage();
+
+    // Set user agent
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36');
+
+    // Set cookies
+    const cookies = JSON.parse(fs.readFileSync(cookiesPath));
+    // await page.setCookie(...cookies);
+
+    // Navigate to ChatGPT
+    await page.goto('https://chatgpt.com/', {waitUntil: 'networkidle2'});
+    await new Promise(resolve => setTimeout(resolve, 5000)); // wait for 2 seconds
+
+    await takeScreenshot(page, 'opened-chatgpt');
+
+    // Accept cookie if needed
+    try {
+        await page.waitForSelector('button:has-text("Reject non-essential")', {timeout: 3000});
+        await page.click('button:has-text("Accept all")');
+        console.log('✅ Accepted cookies');
+        await takeScreenshot(page, 'accepted-cookies');
+    } catch (_) {
+        console.log('ℹ️ No cookie banner');
+        await takeScreenshot(page, 'no-cookie-banner');
+    }
+
+    // Check if land on login page
+    await reloadPage(page, browser);
+
+    // adding input
     await handleInput(page)
 
 
@@ -298,7 +284,16 @@ async function runAutomation() {
         const elements = document.querySelectorAll('.markdown.prose');
         return elements[elements.length - 1]?.innerText || '❌ No response found';
     });
-    console.log('\n🧠 ChatGPT Response:\n', response);
+// console.log('\n🧠 ChatGPT Response:\n', response);
+
+    const response1 = await page.evaluate(() => {
+        const elements = document.querySelectorAll('.markdown.prose');
+        return elements[elements.length - 1]?.innerHTML || '❌ No response found';
+    });
+    console.log('Raw html data', response1)
+
+    // converting html to json
+    // await htmlToJson(page)
 
     // click on sources button
     await getSources(page)
